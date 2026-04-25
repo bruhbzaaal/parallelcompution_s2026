@@ -1,0 +1,171 @@
+#include <iostream>
+#include <cuda_runtime.h>
+#include <chrono>
+#include <cstring>
+
+using namespace std;
+
+#define CHECK_CUDA(call)                                      \
+    do {                                                      \
+        cudaError_t err = call;                               \
+        if (err != cudaSuccess) {                             \
+            cout << "CUDA error: "                            \
+                 << cudaGetErrorString(err) << endl;          \
+            return 1;                                         \
+        }                                                     \
+    } while (0)
+
+double bandwidthGBs(size_t bytes, double seconds)
+{
+    return (bytes / 1e9) / seconds;
+}
+
+int main()
+{
+    const size_t sizeMB = 256;
+    const size_t sizeBytes = sizeMB * 1024 * 1024;
+    const int iterations = 20;
+
+    cout << "Memory copy benchmark" << endl;
+    cout << "Data size: " << sizeMB << " MB" << endl;
+    cout << "Iterations: " << iterations << endl << endl;
+
+    char* h_src = new char[sizeBytes];
+    char* h_dst = new char[sizeBytes];
+
+    for (size_t i = 0; i < sizeBytes; i++)
+        h_src[i] = static_cast<char>(i % 256);
+
+    char* d_src = nullptr;
+    char* d_dst = nullptr;
+
+    CHECK_CUDA(cudaMalloc((void**)&d_src, sizeBytes));
+    CHECK_CUDA(cudaMalloc((void**)&d_dst, sizeBytes));
+
+    CHECK_CUDA(cudaMemcpy(d_src, h_src, sizeBytes, cudaMemcpyHostToDevice));
+
+    // Host -> Host
+    auto start = chrono::high_resolution_clock::now();
+
+    for (int i = 0; i < iterations; i++)
+        memcpy(h_dst, h_src, sizeBytes);
+
+    auto end = chrono::high_resolution_clock::now();
+
+    double timeHH = chrono::duration<double>(end - start).count() / iterations;
+
+    cout << "Host -> Host:" << endl;
+    cout << "Time: " << timeHH << " sec" << endl;
+    cout << "Bandwidth: " << bandwidthGBs(sizeBytes, timeHH) << " GB/s" << endl << endl;
+
+    // Host -> Device
+    start = chrono::high_resolution_clock::now();
+
+    for (int i = 0; i < iterations; i++)
+        CHECK_CUDA(cudaMemcpy(d_dst, h_src, sizeBytes, cudaMemcpyHostToDevice));
+
+    CHECK_CUDA(cudaDeviceSynchronize());
+    end = chrono::high_resolution_clock::now();
+
+    double timeHD = chrono::duration<double>(end - start).count() / iterations;
+
+    cout << "Host -> Device:" << endl;
+    cout << "Time: " << timeHD << " sec" << endl;
+    cout << "Bandwidth: " << bandwidthGBs(sizeBytes, timeHD) << " GB/s" << endl << endl;
+
+    // Device -> Host
+    start = chrono::high_resolution_clock::now();
+
+    for (int i = 0; i < iterations; i++)
+        CHECK_CUDA(cudaMemcpy(h_dst, d_src, sizeBytes, cudaMemcpyDeviceToHost));
+
+    CHECK_CUDA(cudaDeviceSynchronize());
+    end = chrono::high_resolution_clock::now();
+
+    double timeDH = chrono::duration<double>(end - start).count() / iterations;
+
+    cout << "Device -> Host:" << endl;
+    cout << "Time: " << timeDH << " sec" << endl;
+    cout << "Bandwidth: " << bandwidthGBs(sizeBytes, timeDH) << " GB/s" << endl << endl;
+
+    // Device -> Device
+    start = chrono::high_resolution_clock::now();
+
+    for (int i = 0; i < iterations; i++)
+        CHECK_CUDA(cudaMemcpy(d_dst, d_src, sizeBytes, cudaMemcpyDeviceToDevice));
+
+    CHECK_CUDA(cudaDeviceSynchronize());
+    end = chrono::high_resolution_clock::now();
+
+    double timeDD = chrono::duration<double>(end - start).count() / iterations;
+
+    cout << "Device -> Device:" << endl;
+    cout << "Time: " << timeDD << " sec" << endl;
+    cout << "Bandwidth: " << bandwidthGBs(sizeBytes, timeDD) << " GB/s" << endl << endl;
+
+    // Page-locked memory
+    char* h_pinned_src = nullptr;
+    char* h_pinned_dst = nullptr;
+
+    CHECK_CUDA(cudaMallocHost((void**)&h_pinned_src, sizeBytes));
+    CHECK_CUDA(cudaMallocHost((void**)&h_pinned_dst, sizeBytes));
+
+    for (size_t i = 0; i < sizeBytes; i++)
+        h_pinned_src[i] = static_cast<char>(i % 256);
+
+    // Page-locked Host -> Device
+    start = chrono::high_resolution_clock::now();
+
+    for (int i = 0; i < iterations; i++)
+        CHECK_CUDA(cudaMemcpy(d_dst, h_pinned_src, sizeBytes, cudaMemcpyHostToDevice));
+
+    CHECK_CUDA(cudaDeviceSynchronize());
+    end = chrono::high_resolution_clock::now();
+
+    double timePinnedHD = chrono::duration<double>(end - start).count() / iterations;
+
+    cout << "Page-locked Host -> Device:" << endl;
+    cout << "Time: " << timePinnedHD << " sec" << endl;
+    cout << "Bandwidth: " << bandwidthGBs(sizeBytes, timePinnedHD) << " GB/s" << endl << endl;
+
+    // Page-locked Device -> Host
+    start = chrono::high_resolution_clock::now();
+
+    for (int i = 0; i < iterations; i++)
+        CHECK_CUDA(cudaMemcpy(h_pinned_dst, d_src, sizeBytes, cudaMemcpyDeviceToHost));
+
+    CHECK_CUDA(cudaDeviceSynchronize());
+    end = chrono::high_resolution_clock::now();
+
+    double timePinnedDH = chrono::duration<double>(end - start).count() / iterations;
+
+    cout << "Page-locked Device -> Host:" << endl;
+    cout << "Time: " << timePinnedDH << " sec" << endl;
+    cout << "Bandwidth: " << bandwidthGBs(sizeBytes, timePinnedDH) << " GB/s" << endl << endl;
+
+    // Correctness check
+    CHECK_CUDA(cudaMemcpy(h_dst, d_src, sizeBytes, cudaMemcpyDeviceToHost));
+
+    bool correct = true;
+    for (size_t i = 0; i < sizeBytes; i++)
+    {
+        if (h_dst[i] != h_src[i])
+        {
+            correct = false;
+            break;
+        }
+    }
+
+    cout << "Copy correctness: " << (correct ? "OK" : "ERROR") << endl;
+
+    cudaFree(d_src);
+    cudaFree(d_dst);
+
+    cudaFreeHost(h_pinned_src);
+    cudaFreeHost(h_pinned_dst);
+
+    delete[] h_src;
+    delete[] h_dst;
+
+    return 0;
+}
